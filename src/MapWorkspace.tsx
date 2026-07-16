@@ -1,3 +1,16 @@
+// Updated MapWorkspace.tsx for plot-picker-app
+// ─────────────────────────────────────────────────────────────────────────────
+// Replace the existing src/MapWorkspace.tsx with this file.
+//
+// Changes vs original:
+//  - Reads ?plot_id and ?tid from the URL
+//  - On Approve: POSTs coordinates to /api/save-plot (saves to Airtable)
+//  - Shows a "Return to chat" deep-link button after saving
+//
+// In Vercel → Settings → Environment Variables, add:
+//   VITE_BOT_USERNAME = your Telegram bot username (without @), e.g. SoilExplorerBot
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Suspense, lazy, useState, useCallback, useMemo, useEffect } from 'react'
 import { CitySearchControl } from './CitySearchControl'
 import type { CountryCode, PickerCity } from './citySearchService'
@@ -25,6 +38,8 @@ type MapWorkspaceProps = {
   onBack: () => void
 }
 
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
 export function MapWorkspace({ country, onBack }: MapWorkspaceProps) {
   const { messages, dir } = useI18n()
   const d0 = MAP_DEFAULTS[country]
@@ -33,6 +48,13 @@ export function MapWorkspace({ country, onBack }: MapWorkspaceProps) {
   const [selectedCity, setSelectedCity] = useState<string | null>(null)
   const [draft, setDraft] = useState<PolygonValue | null>(null)
   const [approved, setApproved] = useState<PolygonValue | null>(null)
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
+
+  // Read bot context from URL params (injected by the Telegram bot)
+  const urlParams = useMemo(() => new URLSearchParams(window.location.search), [])
+  const plotId = urlParams.get('plot_id')
+  const telegramId = urlParams.get('tid')
+  const botUsername = import.meta.env.VITE_BOT_USERNAME as string | undefined
 
   const handleCitySelect = useCallback((city: PickerCity) => {
     const lat = Number(city.latt)
@@ -80,6 +102,37 @@ export function MapWorkspace({ country, onBack }: MapWorkspaceProps) {
     [approved, selectedCity]
   )
 
+  const handleApprove = useCallback(async () => {
+    if (!draft) return
+    setApproved(draft)
+
+    // If we have a plot_id from the bot, save directly to Airtable
+    if (plotId && draft.coordinates?.[0]) {
+      setSaveStatus('saving')
+      try {
+        const ring = draft.coordinates[0]
+        // Remove closing vertex if polygon is closed
+        const isOpen =
+          ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]
+        const verts = isOpen ? ring.slice(0, -1) : ring
+
+        const res = await fetch('/api/save-plot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plot_id: plotId, coordinates: verts, tid: telegramId }),
+        })
+
+        if (res.ok) {
+          setSaveStatus('saved')
+        } else {
+          setSaveStatus('error')
+        }
+      } catch {
+        setSaveStatus('error')
+      }
+    }
+  }, [draft, plotId, telegramId])
+
   const mapValue = approved ?? draft
   const readonly = !!approved
 
@@ -87,6 +140,11 @@ export function MapWorkspace({ country, onBack }: MapWorkspaceProps) {
     if (!approved?.coordinates?.[0]) return []
     return ringToLatLng(approved.coordinates[0]).map(p => [p.lng, p.lat] as const)
   }, [approved])
+
+  // Build Telegram deep-link for "Return to chat" button
+  const returnToChat = plotId && botUsername
+    ? `https://t.me/${botUsername}?start=plotdone_${plotId}`
+    : null
 
   return (
     <div className="min-h-screen bg-gray-50" dir={dir}>
@@ -144,7 +202,7 @@ export function MapWorkspace({ country, onBack }: MapWorkspaceProps) {
             <button
               type="button"
               disabled={!draft}
-              onClick={() => draft && setApproved(draft)}
+              onClick={handleApprove}
               className="px-6 py-3 rounded-lg font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shadow"
             >
               {messages.approve.button}
@@ -191,9 +249,36 @@ export function MapWorkspace({ country, onBack }: MapWorkspaceProps) {
               </div>
             </div>
 
+            {/* Airtable save status + Return to chat button */}
+            {plotId && (
+              <div className="space-y-3">
+                {saveStatus === 'saving' && (
+                  <p className="text-sm text-gray-500">Saving your plot…</p>
+                )}
+                {saveStatus === 'error' && (
+                  <p className="text-sm text-red-600">
+                    Something went wrong saving your plot. Please go back to the chat and paste the coordinates manually.
+                  </p>
+                )}
+                {saveStatus === 'saved' && returnToChat && (
+                  <a
+                    href={returnToChat}
+                    className="flex items-center justify-center gap-2 w-full px-6 py-4 rounded-xl font-semibold text-white bg-green-600 hover:bg-green-700 shadow-md text-base"
+                  >
+                    ✅ Plot saved — Return to chat
+                  </a>
+                )}
+                {saveStatus === 'saved' && !returnToChat && (
+                  <p className="text-sm text-green-700 font-medium">
+                    ✅ Plot saved! You can return to the chat now.
+                  </p>
+                )}
+              </div>
+            )}
+
             <button
               type="button"
-              onClick={() => setApproved(null)}
+              onClick={() => { setApproved(null); setSaveStatus('idle') }}
               className="px-5 py-2.5 rounded-lg font-medium border border-gray-400 text-gray-800 hover:bg-gray-100"
             >
               {messages.approve.editAgain}
